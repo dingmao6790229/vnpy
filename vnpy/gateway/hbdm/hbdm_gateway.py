@@ -59,10 +59,15 @@ STATUS_HBDM2VT = {
 ORDERTYPE_VT2HBDM = {
     OrderType.MARKET: "opponent",
     OrderType.LIMIT: "limit",
+    OrderType.FOK: "fok",
+    OrderType.FAK: "ioc"
 }
 ORDERTYPE_HBDM2VT = {v: k for k, v in ORDERTYPE_VT2HBDM.items()}
 ORDERTYPE_HBDM2VT[1] = OrderType.LIMIT
 ORDERTYPE_HBDM2VT[3] = OrderType.MARKET
+ORDERTYPE_HBDM2VT[4] = OrderType.MARKET
+ORDERTYPE_HBDM2VT[5] = OrderType.STOP
+ORDERTYPE_HBDM2VT[6] = OrderType.LIMIT
 
 DIRECTION_VT2HBDM = {
     Direction.LONG: "buy",
@@ -281,41 +286,7 @@ class HbdmRestApi(RestClient):
             self.add_request(
                 method="POST",
                 path="/api/v1/contract_openorders",
-                callback=self.on_query_active_order,
-                data=data,
-                extra=currency
-            )
-
-            # History Orders
-            data = {
-                "symbol": currency,
-                "trade_type": 0,
-                "type": 2,
-                "status": 0,
-                "create_date": 7
-            }
-
-            self.add_request(
-                method="POST",
-                path="/api/v1/contract_hisorders",
-                callback=self.on_query_history_order,
-                data=data,
-                extra=currency
-            )
-
-    def query_trade(self):
-        """"""
-        for currency in self.currencies:
-            data = {
-                "symbol": currency,
-                "trade_type": 0,
-                "create_date": 7
-            }
-
-            self.add_request(
-                method="POST",
-                path="/api/v1/contract_matchresults",
-                callback=self.on_query_trade,
+                callback=self.on_query_order,
                 data=data,
                 extra=currency
             )
@@ -366,7 +337,7 @@ class HbdmRestApi(RestClient):
             else:
                 for d in data["data"]:
                     dt = datetime.fromtimestamp(d["id"])
-                    
+
                     bar = BarData(
                         symbol=req.symbol,
                         exchange=req.exchange,
@@ -546,7 +517,7 @@ class HbdmRestApi(RestClient):
         for position in self.positions.values():
             self.gateway.on_position(position)
 
-    def on_query_active_order(self, data, request):
+    def on_query_order(self, data, request):
         """"""
         if self.check_error(data, "查询活动委托"):
             return
@@ -579,61 +550,6 @@ class HbdmRestApi(RestClient):
 
         self.gateway.write_log(f"{request.extra}活动委托信息查询成功")
 
-    def on_query_history_order(self, data, request):
-        """"""
-        if self.check_error(data, "查询历史委托"):
-            return
-
-        for d in data["data"]["orders"]:
-            timestamp = d["create_date"]
-            dt = datetime.fromtimestamp(timestamp / 1000)
-            time = dt.strftime("%H:%M:%S")
-
-            orderid = d["order_id"]
-
-            order = OrderData(
-                orderid=orderid,
-                symbol=d["contract_code"],
-                exchange=Exchange.HUOBI,
-                price=d["price"],
-                volume=d["volume"],
-                type=ORDERTYPE_HBDM2VT[d["order_price_type"]],
-                direction=DIRECTION_HBDM2VT[d["direction"]],
-                offset=OFFSET_HBDM2VT[d["offset"]],
-                traded=d["trade_volume"],
-                status=STATUS_HBDM2VT[d["status"]],
-                time=time,
-                gateway_name=self.gateway_name,
-            )
-            self.gateway.on_order(order)
-
-        self.gateway.write_log(f"{request.extra}历史委托信息查询成功")
-
-    def on_query_trade(self, data, request):
-        """"""
-        if self.check_error(data, "查询成交"):
-            return
-
-        for d in data["data"]["trades"]:
-            dt = datetime.fromtimestamp(d["create_date"] / 1000)
-            time = dt.strftime("%H:%M:%S")
-            
-            trade = TradeData(
-                tradeid=d["match_id"],
-                orderid=d["order_id"],
-                symbol=d["contract_code"],
-                exchange=Exchange.HUOBI,
-                price=d["trade_price"],
-                volume=d["trade_volume"],
-                direction=DIRECTION_HBDM2VT[d["direction"]],
-                offset=OFFSET_HBDM2VT[d["offset"]],
-                time=time,
-                gateway_name=self.gateway_name,
-            )
-            self.gateway.on_trade(trade)
-
-        self.gateway.write_log(f"{request.extra}成交信息查询成功")
-
     def on_query_contract(self, data, request):  # type: (dict, Request)->None
         """"""
         if self.check_error(data, "查询合约"):
@@ -660,7 +576,6 @@ class HbdmRestApi(RestClient):
         self.gateway.write_log("合约信息查询成功")
 
         self.query_order()
-        self.query_trade()
 
     def on_send_order(self, data, request):
         """"""
@@ -744,7 +659,7 @@ class HbdmRestApi(RestClient):
         Callback when sending order caused exception.
         """
         orders = request.extra
-        
+
         for order in orders:
             order.status = Status.REJECTED
             self.gateway.on_order(order)
@@ -770,7 +685,7 @@ class HbdmRestApi(RestClient):
         """"""
         if data["status"] != "error":
             return False
-        
+
         error_code = data["err_code"]
         error_msg = data["err_msg"]
 
@@ -795,17 +710,17 @@ class HbdmWebsocketApiBase(WebsocketClient):
         self.req_id = 0
 
     def connect(
-        self, 
-        key: str, 
-        secret: str, 
-        url: str, 
-        proxy_host: str, 
+        self,
+        key: str,
+        secret: str,
+        url: str,
+        proxy_host: str,
         proxy_port: int
     ):
         """"""
         self.key = key
         self.secret = secret
-        
+
         host, path = _split_url(url)
         self.sign_host = host
         self.path = path
@@ -822,7 +737,7 @@ class HbdmWebsocketApiBase(WebsocketClient):
             "type": "api",
             "cid": str(self.req_id),
         }
-        params.update(create_signature(self.key, "GET", self.sign_host, self.path, self.secret))        
+        params.update(create_signature(self.key, "GET", self.sign_host, self.path, self.secret))
         return self.send_packet(params)
 
     def on_login(self, packet):
@@ -832,7 +747,7 @@ class HbdmWebsocketApiBase(WebsocketClient):
     @staticmethod
     def unpack_data(data):
         """"""
-        return json.loads(zlib.decompress(data, 31)) 
+        return json.loads(zlib.decompress(data, 31))
 
     def on_packet(self, packet):
         """"""
@@ -851,17 +766,17 @@ class HbdmWebsocketApiBase(WebsocketClient):
             return self.on_login()
         else:
             self.on_data(packet)
-    
-    def on_data(self, packet): 
+
+    def on_data(self, packet):
         """"""
         print("data : {}".format(packet))
 
-    def on_error_msg(self, packet): 
+    def on_error_msg(self, packet):
         """"""
         msg = packet["err-msg"]
         if msg == "invalid pong":
             return
-        
+
         self.gateway.write_log(packet["err-msg"])
 
 
@@ -900,7 +815,7 @@ class HbdmTradeWebsocketApi(HbdmWebsocketApiBase):
         op = packet.get("op", None)
         if op != "notify":
             return
-        
+
         topic = packet["topic"]
         if "orders" in topic:
             self.on_order(packet)
@@ -930,7 +845,7 @@ class HbdmTradeWebsocketApi(HbdmWebsocketApiBase):
             gateway_name=self.gateway_name
         )
         self.gateway.on_order(order)
-        
+
         # Push trade event
         trades = data["trade"]
         if not trades:
@@ -951,7 +866,7 @@ class HbdmTradeWebsocketApi(HbdmWebsocketApiBase):
                 volume=d["trade_volume"],
                 time=time,
                 gateway_name=self.gateway_name,
-            )    
+            )
             self.gateway.on_trade(trade)
 
 
@@ -974,7 +889,7 @@ class HbdmDataWebsocketApi(HbdmWebsocketApiBase):
 
         for ws_symbol in self.ticks.keys():
             self.subscribe_data(ws_symbol)
-        
+
     def subscribe(self, req: SubscribeRequest):
         """"""
         contract_type = symbol_type_map.get(req.symbol, "")
@@ -995,25 +910,25 @@ class HbdmDataWebsocketApi(HbdmWebsocketApiBase):
             datetime=datetime.now(),
             gateway_name=self.gateway_name,
         )
-        self.ticks[ws_symbol] = tick            
+        self.ticks[ws_symbol] = tick
 
         self.subscribe_data(ws_symbol)
-    
+
     def subscribe_data(self, ws_symbol: str):
         """"""
         # Subscribe to market depth update
         self.req_id += 1
         req = {
             "sub": f"market.{ws_symbol}.depth.step0",
-            "id": str(self.req_id)     
+            "id": str(self.req_id)
         }
         self.send_packet(req)
-        
+
         # Subscribe to market detail update
         self.req_id += 1
         req = {
             "sub": f"market.{ws_symbol}.detail",
-            "id": str(self.req_id)     
+            "id": str(self.req_id)
         }
         self.send_packet(req)
 
@@ -1038,9 +953,8 @@ class HbdmDataWebsocketApi(HbdmWebsocketApiBase):
 
         tick_data = data["tick"]
         if "bids" not in tick_data or "asks" not in tick_data:
-            print(data)
             return
-        
+
         bids = tick_data["bids"]
         for n in range(5):
             price, volume = bids[n]
@@ -1061,7 +975,7 @@ class HbdmDataWebsocketApi(HbdmWebsocketApiBase):
         ws_symbol = data["ch"].split(".")[1]
         tick = self.ticks[ws_symbol]
         tick.datetime = datetime.fromtimestamp(data["ts"] / 1000)
-        
+
         tick_data = data["tick"]
         tick.open_price = tick_data["open"]
         tick.high_price = tick_data["high"]
@@ -1100,16 +1014,16 @@ def create_signature(api_key, method, host, path, secret_key, get_params=None):
         sorted_params.extend(list(get_params.items()))
         sorted_params = list(sorted(sorted_params))
     encode_params = urllib.parse.urlencode(sorted_params)
-    
+
     payload = [method, host, path, encode_params]
     payload = "\n".join(payload)
     payload = payload.encode(encoding="UTF8")
-    
+
     secret_key = secret_key.encode(encoding="UTF8")
-    
+
     digest = hmac.new(secret_key, payload, digestmod=hashlib.sha256).digest()
     signature = base64.b64encode(digest)
-    
+
     params = dict(sorted_params)
     params["Signature"] = signature.decode("UTF8")
     return params
